@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <cfgmgr32.h>
 #include <propkey.h>
+#include <initguid.h>
+#include <devpkey.h>
 #include <strsafe.h>
 #include <wrl.h>
 
@@ -74,6 +76,11 @@ public:
 private:
     std::wstring msg;
 };
+
+// {00000000-0000-0000-FFFF-FFFFFFFFFFFF}
+DEFINE_GUID(
+    SystemContainerId,
+    0x00000000, 0x0000, 0x0000, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff);
 
 PCWSTR StringFromSerialParity (SerialParity Parity)
 {
@@ -150,6 +157,75 @@ std::wstring GetFirstDevice ()
     return std::wstring(buf.data());
 }
 
+std::wstring GetPortName (PCWSTR DeviceInterface)
+{
+    const DEVPROPKEY propkey = {
+        PKEY_DeviceInterface_Serial_PortName.fmtid,
+        PKEY_DeviceInterface_Serial_PortName.pid
+    };
+
+    DEVPROPTYPE propertyType;
+    WCHAR portName[512];
+    ULONG propertyBufferSize = sizeof(portName);
+    CONFIGRET cr = CM_Get_Device_Interface_PropertyW(
+            DeviceInterface,
+            &propkey,
+            &propertyType,
+            reinterpret_cast<BYTE*>(&portName),
+            &propertyBufferSize,
+            0); // ulFlags
+
+    if ((cr != CR_SUCCESS) || (propertyType != DEVPROP_TYPE_STRING)) {
+        return std::wstring();
+    }
+
+    return std::wstring(portName);
+}
+
+bool IsRestricted (PCWSTR DeviceInterface)
+{
+    DEVPROPTYPE propertyType;
+    DEVPROP_BOOLEAN isRestricted;
+    ULONG propertyBufferSize = sizeof(isRestricted);
+    CONFIGRET cr = CM_Get_Device_Interface_PropertyW(
+            DeviceInterface,
+            &DEVPKEY_DeviceInterface_Restricted,
+            &propertyType,
+            reinterpret_cast<BYTE*>(&isRestricted),
+            &propertyBufferSize,
+            0); // ulFlags
+
+    if ((cr != CR_SUCCESS) || (propertyType != DEVPROP_TYPE_BOOLEAN)) {
+        return true;
+    }
+
+    return isRestricted != DEVPROP_FALSE;
+}
+
+bool IsInSystemContainer (PCWSTR DeviceInterface)
+{
+    DEVPROPTYPE propertyType;
+    DEVPROPGUID containerId;
+    ULONG propertyBufferSize = sizeof(containerId);
+    CONFIGRET cr = CM_Get_Device_Interface_PropertyW(
+            DeviceInterface,
+            &DEVPKEY_Device_ContainerId,
+            &propertyType,
+            reinterpret_cast<BYTE*>(&containerId),
+            &propertyBufferSize,
+            0); // ulFlags
+
+    if ((cr != CR_SUCCESS) || (propertyType != DEVPROP_TYPE_GUID)) {
+        throw wexception(
+            L"Failed to get containerId. "
+            L"(cr = 0x%x, DeviceInterface = %s)",
+            cr,
+            DeviceInterface);
+    }
+
+    return containerId == SystemContainerId;
+}
+
 void ListDevices ()
 {
     ULONG length;
@@ -189,33 +265,28 @@ void ListDevices ()
 
     *buf.rbegin() = UNICODE_NULL;
 
-    ULONG index = 0;
     for (PCWSTR deviceInterface = buf.data();
         *deviceInterface;
         deviceInterface += wcslen(deviceInterface) + 1) {
 
-        const DEVPROPKEY propkey = {
-            PKEY_DeviceInterface_Serial_PortName.fmtid,
-            PKEY_DeviceInterface_Serial_PortName.pid
-        };
-        DEVPROPTYPE propertyType;
-        WCHAR portName[512];
-        ULONG propertyBufferSize = sizeof(portName);
-        cr = CM_Get_Device_Interface_PropertyW(
-                deviceInterface,
-                &propkey,
-                &propertyType,
-                reinterpret_cast<BYTE*>(&portName),
-                &propertyBufferSize,
-                0); // ulFlags
+        auto portName = GetPortName(deviceInterface);
+        bool isRestricted = IsRestricted(deviceInterface);
+        bool isInSystemContainer = IsInSystemContainer(deviceInterface);
+        bool isUwpAccessible = !isInSystemContainer ||
+                               (isInSystemContainer && !isRestricted);
 
-        if ((cr == CR_SUCCESS) && (propertyType == DEVPROP_TYPE_STRING)) {
-            wprintf(L" %lu (%s): %s\n", index, portName, deviceInterface);
-        } else {
-            wprintf(L" %lu: %s\n", index, deviceInterface);
-        }
-
-        ++index;
+        wprintf(
+            L"%s\n"
+            L"    PortName: %s\n"
+            L"    In System Container: %s\n"
+            L"    Restricted: %s\n"
+            L"    UWP Accessible: %s\n"
+            L"\n",
+            deviceInterface,
+            portName.empty() ? L"(not set)" : portName.c_str(),
+            isInSystemContainer ? L"TRUE" : L"FALSE",
+            isRestricted ? L"TRUE" : L"FALSE",
+            isUwpAccessible ? L"TRUE" : L"FALSE");
     }
 }
 
